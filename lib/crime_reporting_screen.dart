@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:date_time_picker/date_time_picker.dart';
 import 'package:fluttertoast/fluttertoast.dart';
-import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geolocator/geolocator.dart';
 
 class CrimeReportingScreen extends StatefulWidget {
   @override
@@ -11,10 +12,13 @@ class CrimeReportingScreen extends StatefulWidget {
 
 class _CrimeReportingScreenState extends State<CrimeReportingScreen> {
   int _activeStepIndex = 0;
+  final _formKey = GlobalKey<FormState>();
 
   String startDate = "";
   String endDate = "";
   String dob = "";
+  double? latitude;
+  double? longitude;
 
   TextEditingController name = TextEditingController();
   TextEditingController phone = TextEditingController();
@@ -37,15 +41,24 @@ class _CrimeReportingScreenState extends State<CrimeReportingScreen> {
   TextEditingController suspectHeight = TextEditingController();
   TextEditingController suspectMarks = TextEditingController();
 
-  void _saveFormData() async {
-    SharedPreferences prefs = await SharedPreferences.getInstance();
-    List<String>? formDataList = prefs.getStringList('formDataList');
-    if (formDataList == null) {
-      formDataList = [];
+  Future<void> _saveFormData() async {
+    await Future.delayed(Duration(milliseconds: 100));
+
+    if (!_formKey.currentState!.validate()) {
+      Fluttertoast.showToast(msg: 'Please fill all required fields.');
+      return;
     }
 
+    if (latitude == null || longitude == null) {
+      Fluttertoast.showToast(msg: 'Please capture location before submitting.');
+      return;
+    }
+
+    // Use Firestore to store FIR under 'client' collection
+    CollectionReference collRef =
+        FirebaseFirestore.instance.collection('client');
+
     Map<String, dynamic> formData = {
-      'id': UniqueKey().toString(),
       'name': name.text,
       'phone': phone.text,
       'dob': dob,
@@ -67,156 +80,207 @@ class _CrimeReportingScreenState extends State<CrimeReportingScreen> {
       'suspectDeformities': suspectDeformities.text,
       'suspectDialect': suspectDialect.text,
       'suspectMarks': suspectMarks.text,
+      'latitude': latitude,
+      'longitude': longitude,
       'status': "Registered",
       'progressValue': 0.2,
+      'timestamp': FieldValue.serverTimestamp(),
     };
 
-    formDataList.add(json.encode(formData));
-    await prefs.setStringList('formDataList', formDataList);
-    Fluttertoast.showToast(msg: "Crime Reported Successfully!");
-    Navigator.pop(context);
+    try {
+      await collRef.add(formData);
+
+      Fluttertoast.showToast(msg: "FIR Submitted Successfully!");
+      Navigator.pop(context);
+    } catch (e) {
+      Fluttertoast.showToast(msg: "Failed to submit FIR.");
+      print("Firestore Error: $e");
+    }
+  }
+
+  Future<void> _getCurrentLocation() async {
+    Fluttertoast.showToast(msg: 'Getting location...');
+
+    bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      Fluttertoast.showToast(msg: 'Location services are disabled.');
+      return;
+    }
+
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        Fluttertoast.showToast(msg: 'Location permissions are denied.');
+        return;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      Fluttertoast.showToast(
+          msg: 'Location permissions are permanently denied.');
+      return;
+    }
+
+    try {
+      final position = await Geolocator.getCurrentPosition(
+          desiredAccuracy: LocationAccuracy.high);
+      setState(() {
+        latitude = position.latitude;
+        longitude = position.longitude;
+      });
+      Fluttertoast.showToast(msg: 'Location Captured!');
+    } catch (e) {
+      Fluttertoast.showToast(msg: 'Failed to get location.');
+    }
   }
 
   List<Step> stepList() => [
         Step(
           state: _activeStepIndex <= 0 ? StepState.editing : StepState.complete,
           isActive: _activeStepIndex >= 0,
-          title: Text('Personal Information',
-              style: TextStyle(fontWeight: FontWeight.bold)),
+          title: Text('Personal Information'),
           content: Column(
             children: [
-              _buildCustomTextField(name, 'Full Name'),
-              _buildCustomTextField(phone, 'Mobile No'),
+              _buildFormTextField(name, 'Full Name'),
+              _buildFormTextField(phone, 'Mobile No'),
               DateTimePicker(
                 initialValue: '',
-                firstDate: DateTime(2000),
-                lastDate: DateTime(2100),
+                firstDate: DateTime(1900),
+                lastDate: DateTime.now(),
                 dateLabelText: 'Date of Birth',
                 onChanged: (val) => dob = val,
-                validator: (val) {
-                  dob = val!;
-                  return null;
-                },
-                onSaved: (val) => dob = val!,
+                validator: (val) =>
+                    val == null || val.isEmpty ? 'Required' : null,
                 decoration: _buildInputDecoration('Date of Birth'),
               ),
-              const SizedBox(height: 10),
-              _buildCustomTextField(address, 'Full Address'),
-              _buildCustomTextField(nid, 'NID number'),
-              _buildCustomTextField(occupation, 'Occupation'),
-              _buildCustomTextField(nationality, 'Nationality'),
+              _buildFormTextField(address, 'Full Address'),
+              _buildFormTextField(nid, 'NID number'),
+              _buildFormTextField(occupation, 'Occupation'),
+              _buildFormTextField(nationality, 'Nationality'),
             ],
           ),
         ),
         Step(
           state: _activeStepIndex <= 1 ? StepState.editing : StepState.complete,
           isActive: _activeStepIndex >= 1,
-          title: Text('Details of Incident/Offence',
-              style: TextStyle(fontWeight: FontWeight.bold)),
+          title: Text('Details of Incident'),
           content: Column(
             children: [
-              _buildCustomTextField(offenderName, 'Name of Offender'),
+              _buildFormTextField(offenderName, 'Name of Offender'),
               DateTimePicker(
                 initialValue: '',
                 firstDate: DateTime(2000),
                 lastDate: DateTime(2100),
-                dateLabelText: 'Occurrence of offence from',
+                dateLabelText: 'Occurrence from',
                 onChanged: (val) => startDate = val,
-                validator: (val) {
-                  startDate = val!;
-                  return null;
-                },
-                onSaved: (val) => startDate = val!,
-                decoration: _buildInputDecoration('Occurrence of offence from'),
+                validator: (val) =>
+                    val == null || val.isEmpty ? 'Required' : null,
+                decoration: _buildInputDecoration('Occurrence from'),
               ),
               DateTimePicker(
                 initialValue: '',
                 firstDate: DateTime(2000),
                 lastDate: DateTime(2100),
-                dateLabelText: 'Occurrence of offence until',
+                dateLabelText: 'Occurrence until',
                 onChanged: (val) => endDate = val,
-                validator: (val) {
-                  endDate = val!;
-                  return null;
-                },
-                onSaved: (val) => endDate = val!,
-                decoration:
-                    _buildInputDecoration('Occurrence of offence until'),
+                validator: (val) =>
+                    val == null || val.isEmpty ? 'Required' : null,
+                decoration: _buildInputDecoration('Occurrence until'),
               ),
-              _buildCustomTextField(offenceType, 'Type of Offence'),
-              _buildCustomTextField(offencePlace, 'Place of Offence'),
-              _buildCustomTextField(details, 'Complete details of the event'),
+              _buildFormTextField(offenceType, 'Type of Offence'),
+              _buildFormTextField(offencePlace, 'Place of Offence'),
+              _buildFormTextField(details, 'Complete details of the event'),
+              const SizedBox(height: 10),
+              ElevatedButton.icon(
+                onPressed: _getCurrentLocation,
+                icon: Icon(Icons.location_on),
+                label: Text("Get Current Location"),
+              ),
+              if (latitude != null && longitude != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 8.0),
+                  child: Text("Location: $latitude, $longitude"),
+                ),
             ],
           ),
         ),
         Step(
           state: _activeStepIndex <= 2 ? StepState.editing : StepState.complete,
           isActive: _activeStepIndex >= 2,
-          title: Text('Details of Suspect',
-              style: TextStyle(fontWeight: FontWeight.bold)),
+          title: Text('Details of Suspect'),
           content: Column(
             children: [
-              _buildCustomTextField(suspectGender, 'Sex'),
-              _buildCustomTextField(suspectAge, 'Age of Suspect'),
-              _buildCustomTextField(suspectBuild, 'Build of Suspect'),
-              _buildCustomTextField(suspectHeight, 'Height of Suspect'),
-              _buildCustomTextField(suspectComplexion, 'Complexion of Suspect'),
-              _buildCustomTextField(
-                  suspectDeformities, 'Deformities of Suspect'),
-              _buildCustomTextField(suspectDialect, 'Dialect of Suspect'),
-              _buildCustomTextField(
-                  suspectMarks, 'Visible Body Marks of Suspect'),
+              _buildFormTextField(suspectGender, 'Sex'),
+              _buildFormTextField(suspectAge, 'Age'),
+              _buildFormTextField(suspectBuild, 'Build'),
+              _buildFormTextField(suspectHeight, 'Height'),
+              _buildFormTextField(suspectComplexion, 'Complexion'),
+              _buildFormTextField(suspectDeformities, 'Deformities'),
+              _buildFormTextField(suspectDialect, 'Dialect'),
+              _buildFormTextField(suspectMarks, 'Visible Body Marks'),
             ],
           ),
         ),
         Step(
           state: StepState.complete,
           isActive: _activeStepIndex >= 3,
-          title: Text('Confirm', style: TextStyle(fontWeight: FontWeight.bold)),
+          title: Text('Confirm'),
           content: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               _buildConfirmText('Full Name', name.text),
               _buildConfirmText('Mobile No', phone.text),
-              _buildConfirmText('Date of Birth', dob),
-              _buildConfirmText('Full Address', address.text),
-              _buildConfirmText('Aadhar', nid.text),
+              _buildConfirmText('DOB', dob),
+              _buildConfirmText('Address', address.text),
+              _buildConfirmText('NID', nid.text),
               _buildConfirmText('Occupation', occupation.text),
               _buildConfirmText('Nationality', nationality.text),
-              const SizedBox(height: 10),
-              _buildConfirmText('Offender Name', offenderName.text),
-              _buildConfirmText('Occurrence of offence from', startDate),
-              _buildConfirmText('Occurrence of offence until', endDate),
-              _buildConfirmText('Type of offence', offenceType.text),
-              _buildConfirmText('Location of offence', offencePlace.text),
-              _buildConfirmText('Detail of offence', details.text),
-              const SizedBox(height: 10),
-              _buildConfirmText('Suspect Sex', suspectGender.text),
-              _buildConfirmText('Suspect Age', suspectAge.text),
-              _buildConfirmText('Suspect Build', suspectBuild.text),
-              _buildConfirmText('Suspect Height', suspectHeight.text),
-              _buildConfirmText('Suspect Complexion', suspectComplexion.text),
-              _buildConfirmText('Suspect Deformities', suspectDeformities.text),
-              _buildConfirmText('Suspect Dialect', suspectDialect.text),
-              _buildConfirmText('Suspect Marks', suspectMarks.text),
+              _buildConfirmText('Offender', offenderName.text),
+              _buildConfirmText('Offence From', startDate),
+              _buildConfirmText('Offence Until', endDate),
+              _buildConfirmText('Type', offenceType.text),
+              _buildConfirmText('Place', offencePlace.text),
+              _buildConfirmText('Details', details.text),
+              if (latitude != null && longitude != null)
+                _buildConfirmText(
+                    'Location Coordinates', '$latitude, $longitude'),
+              _buildConfirmText('Gender', suspectGender.text),
+              _buildConfirmText('Age', suspectAge.text),
+              _buildConfirmText('Build', suspectBuild.text),
+              _buildConfirmText('Height', suspectHeight.text),
+              _buildConfirmText('Complexion', suspectComplexion.text),
+              _buildConfirmText('Deformities', suspectDeformities.text),
+              _buildConfirmText('Dialect', suspectDialect.text),
+              _buildConfirmText('Marks', suspectMarks.text),
+              SizedBox(height: 20),
+              Center(
+                child: ElevatedButton.icon(
+                  onPressed: _saveFormData,
+                  icon: Icon(Icons.check, color: Colors.white),
+                  label: Text(
+                    "Submit FIR",
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    padding: EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                    backgroundColor: Colors.deepPurple,
+                  ),
+                ),
+              )
             ],
           ),
         ),
       ];
 
-  Widget _buildCustomTextField(TextEditingController controller, String label) {
+  Widget _buildFormTextField(TextEditingController controller, String label) {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8.0),
-      child: TextField(
+      child: TextFormField(
         controller: controller,
-        decoration: InputDecoration(
-          labelText: label,
-          labelStyle: TextStyle(color: Colors.indigo),
-          border: OutlineInputBorder(),
-          focusedBorder: OutlineInputBorder(
-            borderSide: BorderSide(color: Colors.indigo, width: 2),
-          ),
-        ),
+        validator: (value) =>
+            value == null || value.isEmpty ? 'Required' : null,
+        decoration: _buildInputDecoration(label),
       ),
     );
   }
@@ -224,11 +288,9 @@ class _CrimeReportingScreenState extends State<CrimeReportingScreen> {
   InputDecoration _buildInputDecoration(String labelText) {
     return InputDecoration(
       labelText: labelText,
-      labelStyle: TextStyle(color: Colors.indigo),
       border: OutlineInputBorder(),
-      focusedBorder: OutlineInputBorder(
-        borderSide: BorderSide(color: Colors.indigo, width: 2),
-      ),
+      focusedBorder:
+          OutlineInputBorder(borderSide: BorderSide(color: Colors.indigo)),
     );
   }
 
@@ -246,34 +308,42 @@ class _CrimeReportingScreenState extends State<CrimeReportingScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        backgroundColor: Colors.deepPurple,
-        title: const Text("FIR Reporting"),
-      ),
-      body: Padding(
-        padding: const EdgeInsets.all(20.0),
+          title: const Text("FIR Reporting"),
+          backgroundColor: Colors.deepPurple),
+      body: Form(
+        key: _formKey,
         child: Stepper(
+          type: StepperType.vertical,
           steps: stepList(),
           currentStep: _activeStepIndex,
-          onStepTapped: (index) {
-            setState(() {
-              _activeStepIndex = index;
-            });
-          },
+          onStepTapped: (index) => setState(() => _activeStepIndex = index),
           onStepContinue: () {
             if (_activeStepIndex < stepList().length - 1) {
-              setState(() {
-                _activeStepIndex++;
-              });
-            } else {
-              _saveFormData();
+              setState(() => _activeStepIndex++);
             }
           },
           onStepCancel: () {
             if (_activeStepIndex > 0) {
-              setState(() {
-                _activeStepIndex--;
-              });
+              setState(() => _activeStepIndex--);
             }
+          },
+          controlsBuilder: (BuildContext context, ControlsDetails details) {
+            if (_activeStepIndex == stepList().length - 1) {
+              return const SizedBox.shrink(); // No buttons in Confirm step
+            }
+            return Row(
+              children: <Widget>[
+                ElevatedButton(
+                  onPressed: details.onStepContinue,
+                  child: const Text('Continue'),
+                ),
+                const SizedBox(width: 10),
+                TextButton(
+                  onPressed: details.onStepCancel,
+                  child: const Text('Back'),
+                ),
+              ],
+            );
           },
         ),
       ),
